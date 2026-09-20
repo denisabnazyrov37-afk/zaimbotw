@@ -4,17 +4,20 @@ import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
 
-from dotenv import load_dotenv
 from telegram import Update, ReplyKeyboardMarkup, KeyboardButton
 from telegram.ext import (
     Application, CommandHandler, MessageHandler, ConversationHandler,
     ContextTypes, filters
 )
 
-load_dotenv()
-
-BOT_TOKEN = os.getenv("8972994110:AAEnae91uH3w57YZnqLvpU-LLe2SkyBsRCM", "").strip()
-ADMIN_IDS = {x.strip() for x in os.getenv("ADMIN_IDS", "").split(",") if x.strip()}
+# ============================================================
+# НАСТРОЙКИ БОТА — ВСТАВЬ СЮДА СВОИ ДАННЫЕ
+# ============================================================
+BOT_TOKEN = "ВСТАВЬ_СЮДА_ТОКЕН_ОТ_BOTFATHER"
+ADMIN_IDS = {"ВСТАВЬ_СЮДА_TELEGRAM_ID_АДМИНА"}
+# Если админов несколько:
+# ADMIN_IDS = {"123456789", "987654321"}
+# ============================================================
 DB_PATH = Path(__file__).with_name("loan.db")
 DOCUMENT_DIR = Path(__file__).with_name("case_files")
 
@@ -662,8 +665,10 @@ async def error_handler(update, context):
 
 
 def main():
-    if not BOT_TOKEN:
-        raise RuntimeError("BOT_TOKEN не задан. Добавьте его в Environment Variables Render.")
+    if not BOT_TOKEN or BOT_TOKEN.startswith("ВСТАВЬ_"):
+        raise RuntimeError("В bot.py не указан BOT_TOKEN. Откройте файл bot.py и вставьте токен в настройку BOT_TOKEN.")
+    if not ADMIN_IDS or any(x.startswith("ВСТАВЬ_") for x in ADMIN_IDS):
+        raise RuntimeError("В bot.py не указан ADMIN_IDS. Вставьте Telegram ID администратора.")
     init_db()
     application = Application.builder().token(BOT_TOKEN).build()
 
