@@ -13,7 +13,7 @@ from telegram.ext import (
 
 load_dotenv()
 
-BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
+BOT_TOKEN = os.getenv("8972994110:AAEnae91uH3w57YZnqLvpU-LLe2SkyBsRCM", "").strip()
 ADMIN_IDS = {x.strip() for x in os.getenv("ADMIN_IDS", "").split(",") if x.strip()}
 DB_PATH = Path(__file__).with_name("loan.db")
 DOCUMENT_DIR = Path(__file__).with_name("case_files")
