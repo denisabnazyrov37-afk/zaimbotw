@@ -1,721 +1,311 @@
 
-import os
-import sqlite3
+import os, sqlite3, threading, secrets, hashlib, hmac, json
 from datetime import datetime, timezone
 from pathlib import Path
+from urllib.parse import parse_qsl
+from flask import Flask, request, jsonify, send_from_directory
+from reportlab.lib.pagesizes import A4
+from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+from reportlab.lib.enums import TA_CENTER
+from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, PageBreak
+from reportlab.lib import colors
+from reportlab.pdfbase.ttfonts import TTFont
+from reportlab.pdfbase import pdfmetrics
+from telegram import Update, ReplyKeyboardMarkup, KeyboardButton, WebAppInfo
+from telegram.ext import Application, CommandHandler, MessageHandler, ConversationHandler, ContextTypes, filters
 
-from telegram import Update, ReplyKeyboardMarkup, KeyboardButton
-from telegram.ext import (
-    Application, CommandHandler, MessageHandler, ConversationHandler,
-    ContextTypes, filters
-)
+# ============================================================
+# НАСТРОЙКИ — ВСТАВЬ СЮДА ТОКЕН И TELEGRAM ID АДМИНА
+# ============================================================
+BOT_TOKEN = "ВСТАВЬ_СЮДА_ТОКЕН_ОТ_BOTFATHER"
+ADMIN_IDS = {"ВСТАВЬ_СЮДА_TELEGRAM_ID_АДМИНА"}
 
+# После публикации на Render укажи адрес сервиса:
+MINI_APP_URL = "https://YOUR-SERVICE.onrender.com/"
 # ============================================================
-# НАСТРОЙКИ БОТА — ВСТАВЬ СЮДА СВОИ ДАННЫЕ
-# ============================================================
-BOT_TOKEN = "8972994110:AAEnae91uH3w57YZnqLvpU-LLe2SkyBsRCM"
-ADMIN_IDS = {"5930286295"}
-# Если админов несколько:
-# ADMIN_IDS = {"123456789", "987654321"}
-# ============================================================
+
 DB_PATH = Path(__file__).with_name("loan.db")
-DOCUMENT_DIR = Path(__file__).with_name("case_files")
+FILES_DIR = Path(__file__).with_name("case_files")
+FILES_DIR.mkdir(exist_ok=True)
 
-(
-    FIRST_NAME, LAST_NAME, PATRONYMIC, PHONE, BIRTH_DATE, ADDRESS,
-    PERSON_CONFIRM,
-    PASSPORT_SERIES, PASSPORT_NUMBER, PASSPORT_DATE, PASSPORT_DEPARTMENT,
-    PASSPORT_ISSUED_BY, REGISTRATION_ADDRESS,
-    AMOUNT, TERM, BANK, ACCOUNT, BIK, RECIPIENT,
-    PASSPORT_FRONT, PASSPORT_REGISTRATION, SELFIE,
-    FINAL_CONFIRM
-) = range(23)
-
+app = Flask(__name__, static_folder="web", static_url_path="")
 
 def db():
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
     return conn
 
-
 def now_iso():
     return datetime.now(timezone.utc).isoformat()
 
-
 def init_db():
-    DOCUMENT_DIR.mkdir(exist_ok=True)
     conn = db()
-
-    conn.execute("""
-    CREATE TABLE IF NOT EXISTS users (
-        telegram_id TEXT PRIMARY KEY,
-        username TEXT DEFAULT '',
-        first_name TEXT DEFAULT '',
-        last_name TEXT DEFAULT ''
-    )
-    """)
-
-    conn.execute("""
-    CREATE TABLE IF NOT EXISTS applications (
+    conn.execute("""CREATE TABLE IF NOT EXISTS applications (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
-        telegram_id TEXT NOT NULL,
-        username TEXT DEFAULT '',
-        first_name TEXT NOT NULL,
-        last_name TEXT NOT NULL,
-        patronymic TEXT DEFAULT '',
-        phone TEXT NOT NULL,
-        birth_date TEXT DEFAULT '',
-        address TEXT DEFAULT '',
-        passport_series TEXT NOT NULL,
-        passport_number TEXT NOT NULL,
-        passport_date TEXT NOT NULL,
-        passport_department TEXT NOT NULL,
-        passport_issued_by TEXT NOT NULL,
-        registration_address TEXT NOT NULL,
-        amount INTEGER NOT NULL,
-        term_days INTEGER NOT NULL,
-        bank TEXT NOT NULL,
-        account TEXT NOT NULL,
-        bik TEXT DEFAULT '',
+        telegram_id TEXT NOT NULL, username TEXT DEFAULT '',
+        first_name TEXT NOT NULL, last_name TEXT NOT NULL, patronymic TEXT DEFAULT '',
+        phone TEXT NOT NULL, birth_date TEXT DEFAULT '', address TEXT DEFAULT '',
+        passport_series TEXT NOT NULL, passport_number TEXT NOT NULL,
+        passport_date TEXT NOT NULL, passport_department TEXT NOT NULL,
+        passport_issued_by TEXT NOT NULL, registration_address TEXT NOT NULL,
+        amount INTEGER NOT NULL, term_days INTEGER NOT NULL,
+        bank TEXT NOT NULL, account TEXT NOT NULL, bik TEXT DEFAULT '',
         recipient_name TEXT NOT NULL,
-        passport_front_file_id TEXT DEFAULT '',
-        passport_registration_file_id TEXT DEFAULT '',
+        passport_front_file_id TEXT DEFAULT '', passport_registration_file_id TEXT DEFAULT '',
         selfie_file_id TEXT DEFAULT '',
-        person_confirmed_at TEXT DEFAULT '',
-        final_confirmed_at TEXT DEFAULT '',
-        approved_at TEXT DEFAULT '',
-        paid_at TEXT DEFAULT '',
+        person_confirmed_at TEXT DEFAULT '', final_confirmed_at TEXT DEFAULT '',
+        approved_at TEXT DEFAULT '', paid_at TEXT DEFAULT '',
         status TEXT NOT NULL DEFAULT 'pending',
-        created_at TEXT NOT NULL,
-        updated_at TEXT NOT NULL
-    )
-    """)
+        created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+    )""")
+    conn.execute("""CREATE TABLE IF NOT EXISTS audit_log (
+        id INTEGER PRIMARY KEY AUTOINCREMENT, application_id INTEGER NOT NULL,
+        actor_telegram_id TEXT NOT NULL, action TEXT NOT NULL,
+        created_at TEXT NOT NULL, details TEXT DEFAULT ''
+    )""")
+    conn.commit(); conn.close()
 
-    conn.execute("""
-    CREATE TABLE IF NOT EXISTS audit_log (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        application_id INTEGER NOT NULL,
-        actor_telegram_id TEXT NOT NULL,
-        action TEXT NOT NULL,
-        created_at TEXT NOT NULL,
-        details TEXT DEFAULT ''
-    )
-    """)
+def audit(app_id, actor, action, details=""):
+    conn=db()
+    conn.execute("INSERT INTO audit_log(application_id,actor_telegram_id,action,created_at,details) VALUES(?,?,?,?,?)",
+                 (app_id,str(actor),action,now_iso(),details))
+    conn.commit(); conn.close()
 
-    conn.commit()
+def verify_webapp_data(init_data: str):
+    """Validate Telegram Mini App initData using the bot token."""
+    if not init_data or not BOT_TOKEN or BOT_TOKEN.startswith("ВСТАВЬ_"):
+        return None
+    try:
+        pairs = dict(parse_qsl(init_data, keep_blank_values=True))
+        received_hash = pairs.pop("hash", None)
+        if not received_hash:
+            return None
+        data_check_string = "\n".join(f"{k}={v}" for k,v in sorted(pairs.items()))
+        secret_key = hmac.new(b"WebAppData", BOT_TOKEN.encode(), hashlib.sha256).digest()
+        calc = hmac.new(secret_key, data_check_string.encode(), hashlib.sha256).hexdigest()
+        if not hmac.compare_digest(calc, received_hash):
+            return None
+        # Reject stale initData older than 24h.
+        auth_date = int(pairs.get("auth_date","0"))
+        if abs(datetime.now(timezone.utc).timestamp() - auth_date) > 86400:
+            return None
+        user = json.loads(pairs.get("user","{}"))
+        return user
+    except Exception:
+        return None
+
+def user_from_request():
+    init_data = request.headers.get("X-Telegram-Init-Data","")
+    return verify_webapp_data(init_data)
+
+def fmt_money(n): return f"{int(n):,}".replace(",", " ") + " ₽"
+
+def contract_pdf(row, out_path):
+    # ReportLab built-in DejaVu may not be available everywhere; use a system font if present.
+    font = "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"
+    bold = "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"
+    if os.path.exists(font):
+        pdfmetrics.registerFont(TTFont("DV", font))
+        pdfmetrics.registerFont(TTFont("DV-Bold", bold))
+        normal, strong = "DV", "DV-Bold"
+    else:
+        normal = strong = "Helvetica"
+
+    doc = SimpleDocTemplate(str(out_path), pagesize=A4, rightMargin=42,leftMargin=42,topMargin=42,bottomMargin=42)
+    styles=getSampleStyleSheet()
+    title=ParagraphStyle("title", parent=styles["Title"], fontName=strong, fontSize=18, leading=23, alignment=TA_CENTER, spaceAfter=18)
+    h=ParagraphStyle("h", parent=styles["Heading2"], fontName=strong, fontSize=12, leading=16, spaceBefore=10, spaceAfter=6)
+    body=ParagraphStyle("body", parent=styles["BodyText"], fontName=normal, fontSize=9.5, leading=14, spaceAfter=6)
+    small=ParagraphStyle("small", parent=body, fontSize=8, leading=11)
+
+    story=[Paragraph("ПРОЕКТ ДОГОВОРА ЗАЙМА", title),
+           Paragraph(f"Договор № {row['id']}", body),
+           Paragraph(f"Дата формирования: {now_iso()[:19].replace('T',' ')} UTC", small),
+           Spacer(1,8)]
+    story += [Paragraph("1. Стороны", h)]
+    borrower=f"{row['last_name']} {row['first_name']} {row['patronymic'] or ''}".strip()
+    party_data=[
+        ["Заемщик", borrower],
+        ["Дата рождения", row["birth_date"]],
+        ["Паспорт", f"{row['passport_series']} {row['passport_number']}"],
+        ["Дата выдачи", row["passport_date"]],
+        ["Код подразделения", row["passport_department"]],
+        ["Кем выдан", row["passport_issued_by"]],
+        ["Адрес регистрации", row["registration_address"]],
+        ["Телефон", row["phone"]],
+    ]
+    t=Table([[Paragraph(str(a),small),Paragraph(str(b),small)] for a,b in party_data], colWidths=[150,330])
+    t.setStyle(TableStyle([("GRID",(0,0),(-1,-1),0.4,colors.grey),("VALIGN",(0,0),(-1,-1),"TOP"),("BACKGROUND",(0,0),(0,-1),colors.whitesmoke),("LEFTPADDING",(0,0),(-1,-1),6),("RIGHTPADDING",(0,0),(-1,-1),6)]))
+    story += [t, Paragraph("2. Предмет договора", h),
+              Paragraph(f"Займодавец предоставляет Заемщику денежные средства в размере <b>{fmt_money(row['amount'])}</b>. Срок займа — <b>{row['term_days']} календарных дней</b> с даты фактической передачи денежных средств.", body),
+              Paragraph("3. Порядок передачи и возврата", h),
+              Paragraph("Факт передачи денежных средств должен подтверждаться банковской операцией/иным документом, позволяющим установить сумму, дату и стороны операции. Условия возврата, проценты, неустойка и иные платежи должны быть определены сторонами до подписания договора.", body),
+              Paragraph("4. Электронное подтверждение", h),
+              Paragraph(f"Заявка сформирована в Telegram. В системе зафиксировано подтверждение личных данных: {row['person_confirmed_at'] or '—'}, финальное подтверждение заявки: {row['final_confirmed_at'] or '—'}. Эти отметки являются техническими записями системы и сами по себе не заменяют юридическую проверку способа заключения договора.", body),
+              Paragraph("5. Реквизиты для перечисления", h)]
+    bank_data=[["Банк",row["bank"]],["Счет/карта",row["account"]],["БИК",row["bik"] or "—"],["Получатель",row["recipient_name"]]]
+    t2=Table([[Paragraph(str(a),small),Paragraph(str(b),small)] for a,b in bank_data], colWidths=[150,330])
+    t2.setStyle(TableStyle([("GRID",(0,0),(-1,-1),0.4,colors.grey),("VALIGN",(0,0),(-1,-1),"TOP"),("BACKGROUND",(0,0),(0,-1),colors.whitesmoke)]))
+    story += [t2, Paragraph("6. Заключительные положения", h),
+              Paragraph("Перед использованием документа стороны должны проверить применимое законодательство, условия займа, проценты и порядок подписания. Настоящий файл в этой версии проекта является шаблоном/проектом и не является юридическим заключением.", body),
+              Spacer(1,18),
+              Paragraph("Заемщик: ________________________________", body),
+              Paragraph("Займодавец: ______________________________", body)]
+    doc.build(story)
+
+@app.route("/")
+def index():
+    return send_from_directory("web","index.html")
+
+@app.route("/health")
+def health():
+    return jsonify(ok=True)
+
+@app.route("/api/applications", methods=["GET"])
+def my_apps():
+    user=user_from_request()
+    if not user: return jsonify(error="Недействительная Telegram-сессия"),401
+    conn=db()
+    rows=conn.execute("SELECT id,amount,term_days,status,created_at,approved_at,paid_at FROM applications WHERE telegram_id=? ORDER BY id DESC",
+                      (str(user.get("id")),)).fetchall()
     conn.close()
+    return jsonify(applications=[dict(r) for r in rows])
 
+@app.route("/api/application/<int:app_id>/contract", methods=["GET"])
+def get_contract(app_id):
+    user=user_from_request()
+    if not user: return jsonify(error="Недействительная Telegram-сессия"),401
+    conn=db(); row=conn.execute("SELECT * FROM applications WHERE id=?",(app_id,)).fetchone(); conn.close()
+    if not row or str(row["telegram_id"]) != str(user.get("id")): return jsonify(error="Нет доступа"),403
+    path=FILES_DIR/f"contract_{app_id}.pdf"
+    if not path.exists(): contract_pdf(row,path)
+    return send_from_directory(FILES_DIR, path.name, as_attachment=True)
 
+@app.route("/api/submit", methods=["POST"])
+def submit():
+    user=user_from_request()
+    if not user: return jsonify(error="Недействительная Telegram-сессия"),401
+    data=request.form
+    required=["first_name","last_name","phone","birth_date","address","passport_series","passport_number",
+              "passport_date","passport_department","passport_issued_by","registration_address",
+              "amount","term_days","bank","account","recipient_name"]
+    missing=[x for x in required if not data.get(x)]
+    if missing: return jsonify(error="Не заполнены поля: "+", ".join(missing)),400
+    try:
+        amount=int(data["amount"]); term=int(data["term_days"])
+        if amount<=0 or term<=0: raise ValueError
+    except: return jsonify(error="Некорректная сумма или срок"),400
+
+    now=now_iso()
+    conn=db()
+    cur=conn.execute("""INSERT INTO applications
+    (telegram_id,username,first_name,last_name,patronymic,phone,birth_date,address,
+     passport_series,passport_number,passport_date,passport_department,passport_issued_by,
+     registration_address,amount,term_days,bank,account,bik,recipient_name,
+     person_confirmed_at,final_confirmed_at,status,created_at,updated_at)
+    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+    (str(user["id"]),user.get("username",""),data["first_name"],data["last_name"],data.get("patronymic",""),
+     data["phone"],data["birth_date"],data["address"],data["passport_series"],data["passport_number"],
+     data["passport_date"],data["passport_department"],data["passport_issued_by"],data["registration_address"],
+     amount,term,data["bank"],data["account"],data.get("bik",""),data["recipient_name"],now,now,"pending",now,now))
+    app_id=cur.lastrowid; conn.commit()
+    row=conn.execute("SELECT * FROM applications WHERE id=?",(app_id,)).fetchone()
+    conn.close()
+    audit(app_id,user["id"],"miniapp_submitted","Заявка отправлена через Mini App")
+    path=FILES_DIR/f"contract_{app_id}.pdf"; contract_pdf(row,path)
+    return jsonify(ok=True,application_id=app_id)
+
+# ---------- Telegram bot ----------
 def main_keyboard():
-    return ReplyKeyboardMarkup(
-        [["📝 Подать заявку"], ["📋 Мои заявки", "👤 Мой профиль"], ["ℹ️ Помощь"]],
-        resize_keyboard=True
-    )
-
-
-def cancel_keyboard():
-    return ReplyKeyboardMarkup([["❌ Отмена"]], resize_keyboard=True)
-
-
-def yes_no_keyboard(yes_text, no_text="✏️ Изменить данные"):
-    return ReplyKeyboardMarkup(
-        [[yes_text], [no_text], ["❌ Отмена"]],
-        resize_keyboard=True
-    )
-
-
-def save_user(update):
-    user = update.effective_user
-    conn = db()
-    conn.execute("""
-    INSERT INTO users (telegram_id, username, first_name, last_name)
-    VALUES (?, ?, ?, ?)
-    ON CONFLICT(telegram_id) DO UPDATE SET
-        username=excluded.username,
-        first_name=excluded.first_name,
-        last_name=excluded.last_name
-    """, (str(user.id), user.username or "", user.first_name or "", user.last_name or ""))
-    conn.commit()
-    conn.close()
-
-
-def audit(application_id, actor_id, action, details=""):
-    conn = db()
-    conn.execute(
-        "INSERT INTO audit_log(application_id, actor_telegram_id, action, created_at, details) VALUES (?, ?, ?, ?, ?)",
-        (application_id, str(actor_id), action, now_iso(), details)
-    )
-    conn.commit()
-    conn.close()
-
+    rows=[]
+    if MINI_APP_URL and "YOUR-SERVICE" not in MINI_APP_URL:
+        rows.append([KeyboardButton("🚀 Открыть приложение", web_app=WebAppInfo(url=MINI_APP_URL))])
+    rows += [["📝 Подать заявку"],["📋 Мои заявки","👤 Мой профиль"],["ℹ️ Помощь"]]
+    return ReplyKeyboardMarkup(rows,resize_keyboard=True)
 
 async def start(update, context):
-    save_user(update)
     await update.message.reply_text(
         "👋 Добро пожаловать!\n\n"
-        "Здесь заявка заполняется прямо в Telegram.\n"
-        "После ввода личных данных будет отдельная кнопка подтверждения, "
-        "а перед отправкой заявки — финальное подтверждение.",
-        reply_markup=main_keyboard()
-    )
-
-
-async def cancel(update, context):
-    context.user_data.clear()
-    await update.message.reply_text("❌ Заполнение отменено.", reply_markup=main_keyboard())
-    return ConversationHandler.END
-
-
-async def begin_application(update, context):
-    context.user_data.clear()
-    await update.message.reply_text("📝 Заявка на займ\n\nВведите имя:", reply_markup=cancel_keyboard())
-    return FIRST_NAME
-
-
-async def first_name(update, context):
-    context.user_data["first_name"] = update.message.text.strip()
-    await update.message.reply_text("Введите фамилию:")
-    return LAST_NAME
-
-
-async def last_name(update, context):
-    context.user_data["last_name"] = update.message.text.strip()
-    await update.message.reply_text("Введите отчество или «-»:")
-    return PATRONYMIC
-
-
-async def patronymic(update, context):
-    v = update.message.text.strip()
-    context.user_data["patronymic"] = "" if v == "-" else v
-    await update.message.reply_text(
-        "📱 Отправьте номер телефона кнопкой ниже.",
-        reply_markup=ReplyKeyboardMarkup(
-            [[KeyboardButton("📱 Отправить номер", request_contact=True)], ["❌ Отмена"]],
-            resize_keyboard=True, one_time_keyboard=True
-        )
-    )
-    return PHONE
-
-
-async def phone(update, context):
-    context.user_data["phone"] = update.message.contact.phone_number if update.message.contact else update.message.text.strip()
-    await update.message.reply_text("Введите дату рождения, например 01.01.1995:", reply_markup=cancel_keyboard())
-    return BIRTH_DATE
-
-
-async def birth_date(update, context):
-    context.user_data["birth_date"] = update.message.text.strip()
-    await update.message.reply_text("Введите адрес проживания:")
-    return ADDRESS
-
-
-async def address(update, context):
-    context.user_data["address"] = update.message.text.strip()
-    d = context.user_data
-    text = (
-        "👤 ПРОВЕРКА ЛИЧНЫХ ДАННЫХ\n\n"
-        f"ФИО: {d['last_name']} {d['first_name']} {d['patronymic'] or '-'}\n"
-        f"Телефон: {d['phone']}\n"
-        f"Дата рождения: {d['birth_date']}\n"
-        f"Адрес проживания: {d['address']}\n\n"
-        "Проверьте данные. После нажатия «Подтвердить» они будут зафиксированы "
-        "как введённые вами сведения для этой заявки."
-    )
-    await update.message.reply_text(
-        text,
-        reply_markup=yes_no_keyboard("✅ Подтвердить личные данные")
-    )
-    return PERSON_CONFIRM
-
-
-async def person_confirm(update, context):
-    choice = update.message.text.strip()
-    if choice == "✏️ Изменить данные":
-        return await begin_application(update, context)
-    if choice != "✅ Подтвердить личные данные":
-        await update.message.reply_text("Нажмите кнопку подтверждения или изменения.")
-        return PERSON_CONFIRM
-
-    context.user_data["person_confirmed_at"] = now_iso()
-    await update.message.reply_text("🛂 Введите серию паспорта (4 цифры):", reply_markup=cancel_keyboard())
-    return PASSPORT_SERIES
-
-
-async def passport_series(update, context):
-    value = update.message.text.strip().replace(" ", "")
-    if len(value) != 4 or not value.isdigit():
-        await update.message.reply_text("Введите серию из 4 цифр.")
-        return PASSPORT_SERIES
-    context.user_data["passport_series"] = value
-    await update.message.reply_text("Введите номер паспорта (6 цифр):")
-    return PASSPORT_NUMBER
-
-
-async def passport_number(update, context):
-    value = update.message.text.strip().replace(" ", "")
-    if len(value) != 6 or not value.isdigit():
-        await update.message.reply_text("Введите номер из 6 цифр.")
-        return PASSPORT_NUMBER
-    context.user_data["passport_number"] = value
-    await update.message.reply_text("Введите дату выдачи паспорта:")
-    return PASSPORT_DATE
-
-
-async def passport_date(update, context):
-    context.user_data["passport_date"] = update.message.text.strip()
-    await update.message.reply_text("Введите код подразделения:")
-    return PASSPORT_DEPARTMENT
-
-
-async def passport_department(update, context):
-    context.user_data["passport_department"] = update.message.text.strip()
-    await update.message.reply_text("Введите, кем выдан паспорт:")
-    return PASSPORT_ISSUED_BY
-
-
-async def passport_issued_by(update, context):
-    context.user_data["passport_issued_by"] = update.message.text.strip()
-    await update.message.reply_text("Введите адрес регистрации:")
-    return REGISTRATION_ADDRESS
-
-
-async def registration_address(update, context):
-    context.user_data["registration_address"] = update.message.text.strip()
-    await update.message.reply_text("💰 Какую сумму хотите получить? Например: 30000")
-    return AMOUNT
-
-
-async def amount(update, context):
-    value = update.message.text.strip().replace(" ", "")
-    try:
-        n = int(value)
-        if n <= 0: raise ValueError
-    except ValueError:
-        await update.message.reply_text("Введите сумму числом, например 30000.")
-        return AMOUNT
-    context.user_data["amount"] = n
-    await update.message.reply_text("📅 Введите срок: 7, 14, 30 или 60 дней.")
-    return TERM
-
-
-async def term(update, context):
-    value = update.message.text.strip()
-    if value not in {"7", "14", "30", "60"}:
-        await update.message.reply_text("Выберите: 7, 14, 30 или 60.")
-        return TERM
-    context.user_data["term_days"] = int(value)
-    await update.message.reply_text("🏦 Введите название банка:")
-    return BANK
-
-
-async def bank(update, context):
-    context.user_data["bank"] = update.message.text.strip()
-    await update.message.reply_text("💳 Введите номер счёта/карты:")
-    return ACCOUNT
-
-
-async def account(update, context):
-    context.user_data["account"] = update.message.text.strip()
-    await update.message.reply_text("Введите БИК или «-»:")
-    return BIK
-
-
-async def bik(update, context):
-    v = update.message.text.strip()
-    context.user_data["bik"] = "" if v == "-" else v
-    await update.message.reply_text("Введите ФИО получателя:")
-    return RECIPIENT
-
-
-async def recipient(update, context):
-    context.user_data["recipient_name"] = update.message.text.strip()
-    await update.message.reply_text("📷 Отправьте фото первой страницы паспорта.")
-    return PASSPORT_FRONT
-
-
-async def passport_front(update, context):
-    if not update.message.photo:
-        await update.message.reply_text("Пожалуйста, отправьте именно фотографию паспорта.")
-        return PASSPORT_FRONT
-    context.user_data["passport_front_file_id"] = update.message.photo[-1].file_id
-    await update.message.reply_text("📷 Теперь отправьте фото страницы с регистрацией.")
-    return PASSPORT_REGISTRATION
-
-
-async def passport_registration(update, context):
-    if not update.message.photo:
-        await update.message.reply_text("Пожалуйста, отправьте фотографию страницы регистрации.")
-        return PASSPORT_REGISTRATION
-    context.user_data["passport_registration_file_id"] = update.message.photo[-1].file_id
-    await update.message.reply_text("🤳 Теперь отправьте селфи, на котором вы держите паспорт рядом с лицом.")
-    return SELFIE
-
-
-def summary(d):
-    return (
-        "🔎 ФИНАЛЬНАЯ ПРОВЕРКА\n\n"
-        f"👤 {d['last_name']} {d['first_name']} {d['patronymic'] or '-'}\n"
-        f"📱 {d['phone']}\n"
-        f"🎂 {d['birth_date']}\n"
-        f"🏠 {d['address']}\n\n"
-        f"🛂 Паспорт: {d['passport_series']} {d['passport_number']}\n"
-        f"📅 Выдан: {d['passport_date']}\n"
-        f"🏢 Код: {d['passport_department']}\n"
-        f"Кем выдан: {d['passport_issued_by']}\n"
-        f"📍 Регистрация: {d['registration_address']}\n\n"
-        f"💰 Сумма: {d['amount']:,} ₽\n"
-        f"📅 Срок: {d['term_days']} дней\n"
-        f"🏦 Банк: {d['bank']}\n"
-        f"💳 Реквизиты: {d['account']}\n"
-        f"БИК: {d['bik'] or '-'}\n"
-        f"Получатель: {d['recipient_name']}\n\n"
-        "📷 Фото паспорта: получено\n"
-        "📷 Фото регистрации: получено\n"
-        "🤳 Селфи: получено\n\n"
-        "Подтвердите отправку заявки."
-    ).replace(",", " ")
-
-
-async def selfie(update, context):
-    if not update.message.photo:
-        await update.message.reply_text("Пожалуйста, отправьте селфи фотографией.")
-        return SELFIE
-    context.user_data["selfie_file_id"] = update.message.photo[-1].file_id
-    await update.message.reply_text(
-        summary(context.user_data),
-        reply_markup=yes_no_keyboard("✅ Подтвердить и отправить заявку", "✏️ Заполнить заново")
-    )
-    return FINAL_CONFIRM
-
-
-def create_application(user, d):
-    now = now_iso()
-    conn = db()
-    cur = conn.execute("""
-    INSERT INTO applications (
-        telegram_id, username, first_name, last_name, patronymic, phone, birth_date, address,
-        passport_series, passport_number, passport_date, passport_department, passport_issued_by,
-        registration_address, amount, term_days, bank, account, bik, recipient_name,
-        passport_front_file_id, passport_registration_file_id, selfie_file_id,
-        person_confirmed_at, final_confirmed_at, status, created_at, updated_at
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    """, (
-        str(user.id), user.username or "", d["first_name"], d["last_name"], d["patronymic"],
-        d["phone"], d["birth_date"], d["address"], d["passport_series"], d["passport_number"],
-        d["passport_date"], d["passport_department"], d["passport_issued_by"],
-        d["registration_address"], d["amount"], d["term_days"], d["bank"], d["account"],
-        d["bik"], d["recipient_name"], d["passport_front_file_id"],
-        d["passport_registration_file_id"], d["selfie_file_id"],
-        d["person_confirmed_at"], now, "pending", now, now
-    ))
-    app_id = cur.lastrowid
-    conn.commit()
-    conn.close()
-    return app_id
-
-
-async def final_confirm(update, context):
-    choice = update.message.text.strip()
-    if choice == "✏️ Заполнить заново":
-        return await begin_application(update, context)
-    if choice != "✅ Подтвердить и отправить заявку":
-        await update.message.reply_text("Нажмите кнопку подтверждения или изменения.")
-        return FINAL_CONFIRM
-
-    d = context.user_data
-    user = update.effective_user
-    app_id = create_application(user, d)
-    audit(app_id, user.id, "borrower_confirmed", "Заявка подтверждена заемщиком в Telegram")
-
-    await update.message.reply_text(
-        f"✅ Заявка №{app_id} отправлена.\n\n"
-        "Статус: 🟡 На рассмотрении.\n"
-        "Администратор получил анкету и фотографии.",
-        reply_markup=main_keyboard()
-    )
-
-    admin_text = (
-        f"🆕 НОВАЯ ЗАЯВКА №{app_id}\n\n"
-        f"👤 {d['last_name']} {d['first_name']} {d['patronymic'] or '-'}\n"
-        f"Telegram ID: {user.id}\nUsername: @{user.username or '-'}\n"
-        f"📱 {d['phone']}\n🎂 {d['birth_date']}\n🏠 {d['address']}\n\n"
-        f"🛂 Паспорт: {d['passport_series']} {d['passport_number']}\n"
-        f"📅 Дата выдачи: {d['passport_date']}\n"
-        f"🏢 Код подразделения: {d['passport_department']}\n"
-        f"Кем выдан: {d['passport_issued_by']}\n"
-        f"📍 Регистрация: {d['registration_address']}\n\n"
-        f"💰 Сумма: {d['amount']:,} ₽\n📅 Срок: {d['term_days']} дней\n"
-        f"🏦 Банк: {d['bank']}\n💳 Реквизиты: {d['account']}\n"
-        f"БИК: {d['bik'] or '-'}\nПолучатель: {d['recipient_name']}\n\n"
-        f"🕐 Подтверждение личных данных: {d['person_confirmed_at']}\n"
-        f"🕐 Финальное подтверждение: {now_iso()}\n\n"
-        f"📌 Статус: pending\n\n"
-        f"/approve_{app_id}\n/reject_{app_id}\n/paid_{app_id}\n/case_{app_id}"
-    ).replace(",", " ")
-
-    for admin_id in ADMIN_IDS:
-        try:
-            await context.bot.send_message(chat_id=int(admin_id), text=admin_text)
-            await context.bot.send_photo(chat_id=int(admin_id), photo=d["passport_front_file_id"],
-                                          caption=f"Заявка №{app_id}: первая страница паспорта")
-            await context.bot.send_photo(chat_id=int(admin_id), photo=d["passport_registration_file_id"],
-                                          caption=f"Заявка №{app_id}: регистрация")
-            await context.bot.send_photo(chat_id=int(admin_id), photo=d["selfie_file_id"],
-                                          caption=f"Заявка №{app_id}: селфи")
-        except Exception as exc:
-            print("Ошибка отправки админу:", exc)
-
-    context.user_data.clear()
-    return ConversationHandler.END
-
-
-async def my_applications(update, context):
-    conn = db()
-    rows = conn.execute("SELECT * FROM applications WHERE telegram_id=? ORDER BY id DESC",
-                        (str(update.effective_user.id),)).fetchall()
-    conn.close()
-    labels = {"pending":"🟡 На рассмотрении","approved":"🟢 Одобрена","rejected":"🔴 Отказана","paid":"💸 Выдана"}
-    if not rows:
-        await update.message.reply_text("📋 У вас пока нет заявок.", reply_markup=main_keyboard())
-        return
-    for row in rows:
-        await update.message.reply_text(
-            f"📋 Заявка №{row['id']}\n\n💰 {row['amount']:,} ₽\n"
-            f"📅 {row['term_days']} дней\n📌 {labels.get(row['status'], row['status'])}\n"
-            f"📅 {row['created_at'][:10]}".replace(",", " ")
-        )
-
-
-async def profile(update, context):
-    user = update.effective_user
-    conn = db()
-    row = conn.execute("SELECT * FROM users WHERE telegram_id=?", (str(user.id),)).fetchone()
-    count = conn.execute("SELECT COUNT(*) c FROM applications WHERE telegram_id=?", (str(user.id),)).fetchone()["c"]
-    conn.close()
-    await update.message.reply_text(
-        "👤 МОЙ ПРОФИЛЬ\n\n"
-        f"Имя: {row['first_name'] if row else user.first_name}\n"
-        f"Фамилия: {row['last_name'] if row else user.last_name or '-'}\n"
-        f"Telegram: @{user.username or '-'}\nЗаявок: {count}",
-        reply_markup=main_keyboard()
-    )
-
-
-async def help_command(update, context):
-    await update.message.reply_text(
-        "ℹ️ Помощь\n\n"
-        "📝 Подать заявку — анкета, паспортные данные и фото.\n"
-        "После личных данных есть отдельное подтверждение.\n"
-        "Перед отправкой — финальное подтверждение.\n"
-        "📋 Мои заявки — статусы.\n"
-        "👤 Мой профиль — профиль.\n\n"
-        "Для разработки используйте тестовые данные. Не загружайте реальные паспорта "
-        "в тестовую среду без необходимых мер защиты и правовых оснований.",
-        reply_markup=main_keyboard()
-    )
-
-
-def is_admin(update):
-    return str(update.effective_user.id) in ADMIN_IDS
-
-
-async def admin(update, context):
-    if not is_admin(update):
-        await update.message.reply_text("Нет доступа.")
-        return
-    conn = db()
-    rows = conn.execute("SELECT * FROM applications ORDER BY id DESC LIMIT 20").fetchall()
-    conn.close()
-    if not rows:
-        await update.message.reply_text("Заявок нет.")
-        return
-    for row in rows:
-        await update.message.reply_text(
-            f"📋 Заявка №{row['id']}\n👤 {row['last_name']} {row['first_name']}\n"
-            f"💰 {row['amount']:,} ₽\n📅 {row['term_days']} дней\n📌 {row['status']}\n\n"
-            f"/approve_{row['id']}\n/reject_{row['id']}\n/paid_{row['id']}\n/case_{row['id']}".replace(",", " ")
-        )
-
-
-def make_case_text(row, logs):
-    lines = [
-        f"ДЕЛО ПО ЗАЯВКЕ №{row['id']}",
-        f"Статус: {row['status']}",
-        f"Создано: {row['created_at']}",
-        f"Обновлено: {row['updated_at']}",
-        "",
-        f"Заемщик: {row['last_name']} {row['first_name']} {row['patronymic'] or '-'}",
-        f"Telegram ID: {row['telegram_id']}",
-        f"Username: @{row['username'] or '-'}",
-        f"Телефон: {row['phone']}",
-        f"Дата рождения: {row['birth_date']}",
-        f"Адрес: {row['address']}",
-        "",
-        f"Паспорт: {row['passport_series']} {row['passport_number']}",
-        f"Дата выдачи: {row['passport_date']}",
-        f"Код подразделения: {row['passport_department']}",
-        f"Кем выдан: {row['passport_issued_by']}",
-        f"Регистрация: {row['registration_address']}",
-        "",
-        f"Сумма: {row['amount']} RUB",
-        f"Срок: {row['term_days']} дней",
-        f"Банк: {row['bank']}",
-        f"Счет/карта: {row['account']}",
-        f"БИК: {row['bik'] or '-'}",
-        f"Получатель: {row['recipient_name']}",
-        "",
-        f"Подтверждение личных данных: {row['person_confirmed_at']}",
-        f"Финальное подтверждение: {row['final_confirmed_at']}",
-        f"Одобрение: {row['approved_at'] or '-'}",
-        f"Выдача: {row['paid_at'] or '-'}",
-        "",
-        "ЖУРНАЛ ДЕЙСТВИЙ:",
-    ]
-    for log in logs:
-        lines.append(f"{log['created_at']} | {log['actor_telegram_id']} | {log['action']} | {log['details']}")
-    lines += [
-        "",
-        "ВАЖНО: этот файл является технической выпиской системы, а не юридическим заключением "
-        "и не гарантирует взыскание долга."
-    ]
-    return "\n".join(lines)
-
-
-async def case_command(update, context):
-    if not is_admin(update):
-        await update.message.reply_text("Нет доступа.")
-        return
-    try:
-        app_id = int(update.message.text.split("_", 1)[1])
-    except Exception:
-        await update.message.reply_text("Использование: /case_ID")
-        return
-
-    conn = db()
-    row = conn.execute("SELECT * FROM applications WHERE id=?", (app_id,)).fetchone()
-    logs = conn.execute("SELECT * FROM audit_log WHERE application_id=? ORDER BY id", (app_id,)).fetchall()
-    conn.close()
-
-    if not row:
-        await update.message.reply_text("Заявка не найдена.")
-        return
-
-    path = DOCUMENT_DIR / f"case_{app_id}.txt"
-    path.write_text(make_case_text(row, logs), encoding="utf-8")
-
-    # Отправляем текстовый пакет. Фото остаются в Telegram как file_id.
-    await update.message.reply_document(
-        document=str(path),
-        caption=f"Техническая выписка по заявке №{app_id}"
-    )
-
-
-async def admin_action(update, context):
-    if not is_admin(update):
-        await update.message.reply_text("Нет доступа.")
-        return
-    command = update.message.text.strip()
-    try:
-        app_id = int(command.split("_")[1])
-    except Exception:
-        await update.message.reply_text("Неверный номер заявки.")
-        return
-
-    if command.startswith("/approve_"):
-        status, message, action = "approved", "🟢 Заявка одобрена.", "approved"
-    elif command.startswith("/reject_"):
-        status, message, action = "rejected", "🔴 Заявка отклонена.", "rejected"
-    elif command.startswith("/paid_"):
-        status, message, action = "paid", "💸 Заявка отмечена как выданная.", "paid"
+        "🚀 Открыть приложение — удобная анкета внутри Telegram.\n"
+        "Там можно заполнить данные и отправить заявку.\n\n"
+        "Если Mini App ещё не настроен, используйте «📝 Подать заявку».",
+        reply_markup=main_keyboard())
+
+async def help_cmd(update,context):
+    await update.message.reply_text("ℹ️ Заполните заявку в боте или Mini App. После отправки система создаёт технический проект договора.",reply_markup=main_keyboard())
+
+async def my_apps_bot(update,context):
+    conn=db(); rows=conn.execute("SELECT id,amount,term_days,status,created_at FROM applications WHERE telegram_id=? ORDER BY id DESC",(str(update.effective_user.id),)).fetchall(); conn.close()
+    labels={"pending":"🟡 На рассмотрении","approved":"🟢 Одобрена","rejected":"🔴 Отказана","paid":"💸 Выдана"}
+    if not rows: return await update.message.reply_text("Заявок пока нет.",reply_markup=main_keyboard())
+    for r in rows:
+        await update.message.reply_text(f"📋 Заявка №{r['id']}\n💰 {fmt_money(r['amount'])}\n📅 {r['term_days']} дней\n📌 {labels.get(r['status'],r['status'])}\n📄 /contract_{r['id']}")
+
+async def contract_cmd(update,context):
+    try: app_id=int(update.message.text.split("_",1)[1])
+    except: return
+    conn=db(); row=conn.execute("SELECT * FROM applications WHERE id=?",(app_id,)).fetchone(); conn.close()
+    if not row or str(row["telegram_id"]) != str(update.effective_user.id):
+        return await update.message.reply_text("Договор не найден.")
+    path=FILES_DIR/f"contract_{app_id}.pdf"
+    contract_pdf(row,path)
+    await update.message.reply_document(document=str(path),caption=f"📄 Проект договора по заявке №{app_id}")
+
+async def admin(update,context):
+    if str(update.effective_user.id) not in ADMIN_IDS: return await update.message.reply_text("Нет доступа.")
+    conn=db(); rows=conn.execute("SELECT id,last_name,first_name,amount,term_days,status,created_at FROM applications ORDER BY id DESC LIMIT 30").fetchall(); conn.close()
+    if not rows: return await update.message.reply_text("Заявок нет.")
+    for r in rows:
+        await update.message.reply_text(f"№{r['id']} — {r['last_name']} {r['first_name']}\n{fmt_money(r['amount'])} / {r['term_days']} дней\nСтатус: {r['status']}\n/approve_{r['id']} /reject_{r['id']} /paid_{r['id']} /case_{r['id']}")
+
+async def admin_action(update,context):
+    if str(update.effective_user.id) not in ADMIN_IDS: return
+    txt=update.message.text
+    try: app_id=int(txt.rsplit("_",1)[1])
+    except: return
+    now=now_iso()
+    conn=db(); row=conn.execute("SELECT * FROM applications WHERE id=?",(app_id,)).fetchone()
+    if not row: conn.close(); return await update.message.reply_text("Заявка не найдена.")
+    if txt.startswith("/approve_"):
+        status="approved"; conn.execute("UPDATE applications SET status=?,approved_at=?,updated_at=? WHERE id=?",(status,now,now,app_id)); msg="🟢 Заявка одобрена."
+    elif txt.startswith("/reject_"):
+        status="rejected"; conn.execute("UPDATE applications SET status=?,updated_at=? WHERE id=?",(status,now,app_id)); msg="🔴 Заявка отклонена."
     else:
-        return
-
-    now = now_iso()
-    conn = db()
-    row = conn.execute("SELECT * FROM applications WHERE id=?", (app_id,)).fetchone()
-    if not row:
-        conn.close()
-        await update.message.reply_text("Заявка не найдена.")
-        return
-
-    if status == "approved":
-        conn.execute("UPDATE applications SET status=?, approved_at=?, updated_at=? WHERE id=?",
-                     (status, now, now, app_id))
-    elif status == "paid":
-        conn.execute("UPDATE applications SET status=?, paid_at=?, updated_at=? WHERE id=?",
-                     (status, now, now, app_id))
-    else:
-        conn.execute("UPDATE applications SET status=?, updated_at=? WHERE id=?",
-                     (status, now, app_id))
-    conn.commit()
-    conn.close()
-
-    audit(app_id, update.effective_user.id, action, message)
-    await update.message.reply_text(message)
-
+        status="paid"; conn.execute("UPDATE applications SET status=?,paid_at=?,updated_at=? WHERE id=?",(status,now,now,app_id)); msg="💸 Выдача отмечена."
+    conn.commit(); row=conn.execute("SELECT * FROM applications WHERE id=?",(app_id,)).fetchone(); conn.close()
+    audit(app_id,update.effective_user.id,status,msg)
+    if status in ("approved","paid"):
+        path=FILES_DIR/f"contract_{app_id}.pdf"; contract_pdf(row,path)
+    await update.message.reply_text(msg)
     try:
-        await context.bot.send_message(chat_id=int(row["telegram_id"]),
-                                       text=f"📋 Заявка №{app_id}\n\n{message}")
-    except Exception as exc:
-        print("Не удалось уведомить клиента:", exc)
+        await context.bot.send_message(chat_id=int(row["telegram_id"]),text=f"Заявка №{app_id}\n{msg}")
+        if status=="approved":
+            await context.bot.send_document(chat_id=int(row["telegram_id"]),document=str(path),caption="📄 Проект договора займа")
+    except Exception as e: print(e)
 
+def run_flask():
+    port=int(os.getenv("PORT","10000"))
+    app.run(host="0.0.0.0",port=port,debug=False,use_reloader=False)
 
-async def error_handler(update, context):
-    print("BOT ERROR:", context.error)
+def run_bot():
+    import asyncio
+    async def runner():
+        if not BOT_TOKEN or BOT_TOKEN.startswith("ВСТАВЬ_"):
+            raise RuntimeError("В bot.py не указан BOT_TOKEN")
+        init_db()
+        application=Application.builder().token(BOT_TOKEN).build()
+        application.add_handler(CommandHandler("start",start))
+        application.add_handler(CommandHandler("help",help_cmd))
+        application.add_handler(CommandHandler("admin",admin))
+        application.add_handler(MessageHandler(filters.Regex(r"^/contract_\d+$"),contract_cmd))
+        application.add_handler(MessageHandler(filters.Regex(r"^/(approve|reject|paid)_\d+$"),admin_action))
+        application.add_handler(MessageHandler(filters.Regex("^📋 Мои заявки$"),my_apps_bot))
+        application.add_handler(MessageHandler(filters.Regex("^ℹ️ Помощь$"),help_cmd))
+        application.run_polling(allowed_updates=Update.ALL_TYPES)
+    asyncio.run(runner())
 
-
-def main():
-    if not BOT_TOKEN or BOT_TOKEN.startswith("ВСТАВЬ_"):
-        raise RuntimeError("В bot.py не указан BOT_TOKEN. Откройте файл bot.py и вставьте токен в настройку BOT_TOKEN.")
-    if not ADMIN_IDS or any(x.startswith("ВСТАВЬ_") for x in ADMIN_IDS):
-        raise RuntimeError("В bot.py не указан ADMIN_IDS. Вставьте Telegram ID администратора.")
+if __name__=="__main__":
     init_db()
-    application = Application.builder().token(BOT_TOKEN).build()
-
-    conversation = ConversationHandler(
-        entry_points=[MessageHandler(filters.Regex("^📝 Подать заявку$"), begin_application)],
-        states={
-            FIRST_NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, first_name)],
-            LAST_NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, last_name)],
-            PATRONYMIC: [MessageHandler(filters.TEXT & ~filters.COMMAND, patronymic)],
-            PHONE: [MessageHandler((filters.CONTACT | filters.TEXT) & ~filters.COMMAND, phone)],
-            BIRTH_DATE: [MessageHandler(filters.TEXT & ~filters.COMMAND, birth_date)],
-            ADDRESS: [MessageHandler(filters.TEXT & ~filters.COMMAND, address)],
-            PERSON_CONFIRM: [MessageHandler(filters.TEXT & ~filters.COMMAND, person_confirm)],
-            PASSPORT_SERIES: [MessageHandler(filters.TEXT & ~filters.COMMAND, passport_series)],
-            PASSPORT_NUMBER: [MessageHandler(filters.TEXT & ~filters.COMMAND, passport_number)],
-            PASSPORT_DATE: [MessageHandler(filters.TEXT & ~filters.COMMAND, passport_date)],
-            PASSPORT_DEPARTMENT: [MessageHandler(filters.TEXT & ~filters.COMMAND, passport_department)],
-            PASSPORT_ISSUED_BY: [MessageHandler(filters.TEXT & ~filters.COMMAND, passport_issued_by)],
-            REGISTRATION_ADDRESS: [MessageHandler(filters.TEXT & ~filters.COMMAND, registration_address)],
-            AMOUNT: [MessageHandler(filters.TEXT & ~filters.COMMAND, amount)],
-            TERM: [MessageHandler(filters.TEXT & ~filters.COMMAND, term)],
-            BANK: [MessageHandler(filters.TEXT & ~filters.COMMAND, bank)],
-            ACCOUNT: [MessageHandler(filters.TEXT & ~filters.COMMAND, account)],
-            BIK: [MessageHandler(filters.TEXT & ~filters.COMMAND, bik)],
-            RECIPIENT: [MessageHandler(filters.TEXT & ~filters.COMMAND, recipient)],
-            PASSPORT_FRONT: [MessageHandler(filters.PHOTO, passport_front)],
-            PASSPORT_REGISTRATION: [MessageHandler(filters.PHOTO, passport_registration)],
-            SELFIE: [MessageHandler(filters.PHOTO, selfie)],
-            FINAL_CONFIRM: [MessageHandler(filters.TEXT & ~filters.COMMAND, final_confirm)],
-        },
-        fallbacks=[MessageHandler(filters.Regex("^❌ Отмена$"), cancel)],
-    )
-
-    application.add_handler(CommandHandler("start", start))
-    application.add_handler(CommandHandler("help", help_command))
-    application.add_handler(CommandHandler("admin", admin))
-    application.add_handler(MessageHandler(filters.Regex(r"^/(approve|reject|paid)_\d+$"), admin_action))
-    application.add_handler(MessageHandler(filters.Regex(r"^/case_\d+$"), case_command))
-    application.add_handler(conversation)
-    application.add_handler(MessageHandler(filters.Regex("^📋 Мои заявки$"), my_applications))
-    application.add_handler(MessageHandler(filters.Regex("^👤 Мой профиль$"), profile))
-    application.add_handler(MessageHandler(filters.Regex("^ℹ️ Помощь$"), help_command))
-    application.add_error_handler(error_handler)
-
-    print("🤖 Telegram bot started")
-    application.run_polling(allowed_updates=Update.ALL_TYPES)
-
-
-if __name__ == "__main__":
-    main()
+    t=threading.Thread(target=run_bot,daemon=True)
+    t.start()
+    run_flask()

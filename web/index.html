@@ -1,0 +1,71 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>Loan App</title>
+<script src="https://telegram.org/js/telegram-web-app.js"></script>
+<style>
+:root{--bg:#f4f6fb;--card:#fff;--text:#151922;--muted:#7c8493;--accent:#2563eb;--line:#e7eaf0;--good:#16a34a}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font-family:Inter,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}
+.wrap{max-width:720px;margin:auto;padding:18px 14px 40px}.hero{background:linear-gradient(135deg,#111827,#2563eb);color:#fff;border-radius:24px;padding:22px;margin-bottom:14px;box-shadow:0 12px 30px #0002}
+.logo{font-size:30px}.hero h1{margin:8px 0 4px;font-size:24px}.hero p{margin:0;opacity:.82;font-size:14px}
+.card{background:var(--card);border-radius:20px;padding:18px;margin:12px 0;box-shadow:0 5px 18px #00000008}
+h2{font-size:17px;margin:0 0 14px}.grid{display:grid;grid-template-columns:1fr 1fr;gap:10px}
+label{display:block;font-size:12px;color:var(--muted);margin:10px 0 5px}input,select{width:100%;padding:13px;border:1px solid var(--line);border-radius:13px;background:#fff;font-size:15px;outline:none}
+input:focus,select:focus{border-color:var(--accent)}.wide{grid-column:1/-1}.confirm{display:flex;gap:9px;align-items:flex-start;background:#f8fafc;border:1px solid var(--line);padding:12px;border-radius:14px;font-size:13px}
+button{width:100%;border:0;border-radius:14px;padding:15px;background:var(--accent);color:#fff;font-size:16px;font-weight:700;margin-top:14px}.secondary{background:#e9eefc;color:#1743a5}
+.note{font-size:12px;color:var(--muted);line-height:1.45}.success{padding:18px;border-radius:18px;background:#ecfdf3;color:#166534}.hidden{display:none}
+@media(max-width:520px){.grid{grid-template-columns:1fr}}
+</style>
+</head>
+<body>
+<div class="wrap">
+<div class="hero"><div class="logo">◈</div><h1>Заявка на займ</h1><p>Заполните данные прямо внутри Telegram</p></div>
+<div id="app">
+<form id="form">
+<div class="card"><h2>Личные данные</h2><div class="grid">
+<div><label>Имя</label><input name="first_name" required></div>
+<div><label>Фамилия</label><input name="last_name" required></div>
+<div><label>Отчество</label><input name="patronymic"></div>
+<div><label>Телефон</label><input name="phone" required></div>
+<div><label>Дата рождения</label><input name="birth_date" placeholder="01.01.1995" required></div>
+<div class="wide"><label>Адрес проживания</label><input name="address" required></div>
+</div></div>
+<div class="card"><h2>Паспорт</h2><div class="grid">
+<div><label>Серия</label><input name="passport_series" maxlength="4" required></div>
+<div><label>Номер</label><input name="passport_number" maxlength="6" required></div>
+<div><label>Дата выдачи</label><input name="passport_date" required></div>
+<div><label>Код подразделения</label><input name="passport_department" required></div>
+<div class="wide"><label>Кем выдан</label><input name="passport_issued_by" required></div>
+<div class="wide"><label>Адрес регистрации</label><input name="registration_address" required></div>
+</div></div>
+<div class="card"><h2>Займ и реквизиты</h2><div class="grid">
+<div><label>Сумма, ₽</label><input name="amount" type="number" min="1" required></div>
+<div><label>Срок</label><select name="term_days"><option>7</option><option>14</option><option>30</option><option>60</option></select></div>
+<div class="wide"><label>Банк</label><input name="bank" required></div>
+<div class="wide"><label>Счёт / карта</label><input name="account" required></div>
+<div><label>БИК</label><input name="bik"></div>
+<div><label>ФИО получателя</label><input name="recipient_name" required></div>
+</div></div>
+<div class="card"><div class="confirm"><input id="confirm" type="checkbox" required><span>Я проверил(а) введённые сведения и подтверждаю, что они введены мной. Перед отправкой заявки я ознакомлюсь с условиями договора.</span></div>
+<button type="submit">Проверить и отправить заявку</button><p class="note">Это демонстрационная техническая форма. Перед реальной выдачей займа требуется юридическая проверка договора, способа его заключения и обработки персональных данных.</p></div>
+</form>
+<div id="result" class="hidden"></div>
+</div>
+</div>
+<script>
+const tg=window.Telegram?.WebApp; if(tg){tg.ready();tg.expand();}
+const form=document.getElementById('form'), result=document.getElementById('result');
+form.addEventListener('submit',async e=>{
+ e.preventDefault();
+ const fd=new FormData(form);
+ const r=await fetch('/api/submit',{method:'POST',headers:{'X-Telegram-Init-Data':tg?.initData||''},body:fd});
+ const data=await r.json();
+ if(!r.ok){alert(data.error||'Ошибка');return;}
+ form.classList.add('hidden');
+ result.className='success';
+ result.innerHTML=`<h2>Заявка №${data.application_id} отправлена</h2><p>Заявка принята на рассмотрение. Технический проект договора сформирован.</p><button class="secondary" onclick="location.reload()">Вернуться</button>`;
+ if(tg) tg.MainButton.hide();
+});
+</script>
+</body></html>
