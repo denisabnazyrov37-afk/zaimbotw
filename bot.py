@@ -17,11 +17,11 @@ from telegram.ext import Application, CommandHandler, MessageHandler, Conversati
 # ============================================================
 # НАСТРОЙКИ — ВСТАВЬ СЮДА ТОКЕН И TELEGRAM ID АДМИНА
 # ============================================================
-BOT_TOKEN = "8972994110:AAEnae91uH3w57YZnqLvpU-LLe2SkyBsRCM"
-ADMIN_IDS = {"5930286295"}
+BOT_TOKEN = "ВСТАВЬ_СЮДА_ТОКЕН_ОТ_BOTFATHER"
+ADMIN_IDS = {"ВСТАВЬ_СЮДА_TELEGRAM_ID_АДМИНА"}
 
 # После публикации на Render укажи адрес сервиса:
-MINI_APP_URL = "https://zaimbot-y3cs.onrender.com/"
+MINI_APP_URL = "https://YOUR-SERVICE.onrender.com/"
 # ============================================================
 
 DB_PATH = Path(__file__).with_name("loan.db")
@@ -301,7 +301,7 @@ def run_bot():
         application.add_handler(MessageHandler(filters.Regex(r"^/(approve|reject|paid)_\d+$"),admin_action))
         application.add_handler(MessageHandler(filters.Regex("^📋 Мои заявки$"),my_apps_bot))
         application.add_handler(MessageHandler(filters.Regex("^ℹ️ Помощь$"),help_cmd))
-        application.run_polling(allowed_updates=Update.ALL_TYPES)
+        application.run_polling(allowed_updates=Update.ALL_TYPES, stop_signals=[])
     asyncio.run(runner())
 
 if __name__=="__main__":
