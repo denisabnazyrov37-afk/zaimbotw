@@ -49,3 +49,8 @@ PDF сейчас является техническим **проектом/ша
 
 В этой версии исправлена ошибка `set_wakeup_fd only works in main thread`.
 Telegram-бот и Flask Mini App работают в разных потоках, поэтому `run_polling()` запускается без установки Unix signal handlers (`stop_signals=[]`).
+
+
+## Render event-loop fix
+
+The final version runs Flask in a background thread and Telegram polling in the main thread. This avoids both `set_wakeup_fd` and `Cannot close a running event loop` errors caused by calling `run_polling()` inside a background thread/asyncio wrapper.

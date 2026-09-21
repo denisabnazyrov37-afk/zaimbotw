@@ -17,11 +17,11 @@ from telegram.ext import Application, CommandHandler, MessageHandler, Conversati
 # ============================================================
 # НАСТРОЙКИ — ВСТАВЬ СЮДА ТОКЕН И TELEGRAM ID АДМИНА
 # ============================================================
-BOT_TOKEN = "8972994110:AAEnae91uH3w57YZnqLvpU-LLe2SkyBsRCM"
-ADMIN_IDS = {"5930286295"}
+BOT_TOKEN = "ВСТАВЬ_СЮДА_ТОКЕН_ОТ_BOTFATHER"
+ADMIN_IDS = {"ВСТАВЬ_СЮДА_TELEGRAM_ID_АДМИНА"}
 
 # После публикации на Render укажи адрес сервиса:
-MINI_APP_URL = "https://zaimbot-y3cs.onrender.com"
+MINI_APP_URL = "https://YOUR-SERVICE.onrender.com/"
 # ============================================================
 
 DB_PATH = Path(__file__).with_name("loan.db")
@@ -287,25 +287,26 @@ def run_flask():
     port=int(os.getenv("PORT","10000"))
     app.run(host="0.0.0.0",port=port,debug=False,use_reloader=False)
 
-def run_bot():
-    import asyncio
-    async def runner():
-        if not BOT_TOKEN or BOT_TOKEN.startswith("ВСТАВЬ_"):
-            raise RuntimeError("В bot.py не указан BOT_TOKEN")
-        init_db()
-        application=Application.builder().token(BOT_TOKEN).build()
-        application.add_handler(CommandHandler("start",start))
-        application.add_handler(CommandHandler("help",help_cmd))
-        application.add_handler(CommandHandler("admin",admin))
-        application.add_handler(MessageHandler(filters.Regex(r"^/contract_\d+$"),contract_cmd))
-        application.add_handler(MessageHandler(filters.Regex(r"^/(approve|reject|paid)_\d+$"),admin_action))
-        application.add_handler(MessageHandler(filters.Regex("^📋 Мои заявки$"),my_apps_bot))
-        application.add_handler(MessageHandler(filters.Regex("^ℹ️ Помощь$"),help_cmd))
-        application.run_polling(allowed_updates=Update.ALL_TYPES, stop_signals=[])
-    asyncio.run(runner())
+def build_bot_application():
+    if not BOT_TOKEN or BOT_TOKEN.startswith("ВСТАВЬ_"):
+        raise RuntimeError("В bot.py не указан BOT_TOKEN")
+    application=Application.builder().token(BOT_TOKEN).build()
+    application.add_handler(CommandHandler("start",start))
+    application.add_handler(CommandHandler("help",help_cmd))
+    application.add_handler(CommandHandler("admin",admin))
+    application.add_handler(MessageHandler(filters.Regex(r"^/contract_\d+$"),contract_cmd))
+    application.add_handler(MessageHandler(filters.Regex(r"^/(approve|reject|paid)_\d+$"),admin_action))
+    application.add_handler(MessageHandler(filters.Regex("^📋 Мои заявки$"),my_apps_bot))
+    application.add_handler(MessageHandler(filters.Regex("^ℹ️ Помощь$"),help_cmd))
+    return application
 
 if __name__=="__main__":
     init_db()
-    t=threading.Thread(target=run_bot,daemon=True)
-    t.start()
-    run_flask()
+    # Flask runs in the background thread; Telegram polling stays in the MAIN thread.
+    # This avoids Python's signal-handler/event-loop errors on Render.
+    web_thread=threading.Thread(target=run_flask,daemon=True)
+    web_thread.start()
+
+    application=build_bot_application()
+    print("🤖 Telegram bot started")
+    application.run_polling(allowed_updates=Update.ALL_TYPES)
