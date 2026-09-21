@@ -17,8 +17,8 @@ from telegram.ext import Application, CommandHandler, MessageHandler, Conversati
 # ============================================================
 # НАСТРОЙКИ — ВСТАВЬ СЮДА ТОКЕН И TELEGRAM ID АДМИНА
 # ============================================================
-BOT_TOKEN = "ВСТАВЬ_СЮДА_ТОКЕН_ОТ_BOTFATHER"
-ADMIN_IDS = {"ВСТАВЬ_СЮДА_TELEGRAM_ID_АДМИНА"}
+BOT_TOKEN = "8972994110:AAEnae91uH3w57YZnqLvpU-LLe2SkyBsRCM"
+ADMIN_IDS = {"5930286295"}
 
 # После публикации на Render укажи адрес сервиса:
 MINI_APP_URL = "https://YOUR-SERVICE.onrender.com/"
