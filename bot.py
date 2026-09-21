@@ -21,7 +21,7 @@ BOT_TOKEN = "8972994110:AAEnae91uH3w57YZnqLvpU-LLe2SkyBsRCM"
 ADMIN_IDS = {"5930286295"}
 
 # После публикации на Render укажи адрес сервиса:
-MINI_APP_URL = "https://YOUR-SERVICE.onrender.com/"
+MINI_APP_URL = "https://zaimbot-y3cs.onrender.com"
 # ============================================================
 
 DB_PATH = Path(__file__).with_name("loan.db")
